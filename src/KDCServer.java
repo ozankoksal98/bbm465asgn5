@@ -1,28 +1,41 @@
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.security.Key;
 import java.security.KeyStore;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
+import java.security.PublicKey;
 import java.security.Signature;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Date;
 import java.util.Random;
 import java.util.Scanner;
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
 
 public class KDCServer {
+  private static Cipher cipher;
+  private static PrivateKey privKey;
+
   public static void main(String[] args) {
     try {
+      cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding");
+
       ServerSocket serverSocket = new ServerSocket(3000);
       System.out.println("KDC server listening on port " + serverSocket.getLocalPort());
       ArrayList<ClientHandler> threads = new ArrayList<>();
@@ -102,15 +115,15 @@ public class KDCServer {
         FileInputStream fis = new FileInputStream("keystore/kdc.jks");
         KeyStore keystore = KeyStore.getInstance(KeyStore.getDefaultType());
         keystore.load(fis, "password".toCharArray());
-        PrivateKey key = (PrivateKey) keystore.getKey("kdc", "password".toCharArray());
+        privKey = (PrivateKey) keystore.getKey("kdc", "password".toCharArray());
         for (String alias : keys) {
           // Read the certificate from cer file and sign the content
           if (!Files.exists(Paths.get("cert/" + alias + ".cer"))) {
             try {
-              if (key instanceof PrivateKey) {
+              if (privKey instanceof PrivateKey) {
                 byte[] certBytes = Files.readAllBytes(Paths.get("unsignedCerts/" + alias + ".cer"));
                 Signature sig = Signature.getInstance("SHA1WithRSA");
-                sig.initSign(key);
+                sig.initSign(privKey);
                 sig.update(certBytes);
                 byte[] sigBytes = sig.sign();
                 ByteArrayOutputStream signedCert = new ByteArrayOutputStream();
@@ -175,10 +188,20 @@ public class KDCServer {
       reception.interrupt();
       sc.close();
       serverSocket.close();
-    } catch (IOException e) {
+    } catch (Exception e) {
       e.printStackTrace();
 
     }
+  }
+
+  private static byte[] encrypt(byte[] content, Key key) throws Exception {
+    cipher.init(1, key);
+    return cipher.doFinal(content);
+  }
+
+  private static byte[] decrypt(byte[] content, Key key) throws Exception {
+    cipher.init(2, key);
+    return cipher.doFinal(content);
   }
 
   private static class ClientHandler extends Thread {
@@ -203,12 +226,48 @@ public class KDCServer {
       try {
         this.dis = new DataInputStream(clientSocket.getInputStream());
         this.dos = new DataOutputStream(clientSocket.getOutputStream());
-        // Size of message length can be made static later !!
-        int messageOneLength = dis.readInt();
-        byte[] messageOne = new byte[messageOneLength];
-        dis.readFully(messageOne);
 
-      } catch (IOException e) {
+        // Size of message length can be made static later !!
+        // Receive first message
+        int clientNameLength = dis.readInt();
+        byte[] clientNameBytes = new byte[clientNameLength];
+        dis.readFully(clientNameBytes);
+        int encryptedContentLength = dis.readInt();
+        byte[] encryptedContent = new byte[encryptedContentLength];
+        dis.readFully(encryptedContent);
+        String[] secondParts = new String(decrypt(encryptedContent, privKey)).split(",");
+
+        // Send second message
+        // First part of the second message
+        Date timeStampTwo = new Date();
+        KeyGenerator kg = KeyGenerator.getInstance("AES");
+        kg.init(128);
+        SecretKey sessionKey = kg.generateKey();
+        String encodedKey = Base64.getEncoder().encodeToString(sessionKey.getEncoded());
+        String firstPart = encodedKey + "," + secondParts[2] + "," + timeStampTwo.toString();
+        byte[] clientCertBytes = new String(Files.readAllBytes(Paths.get("cert/client.cer"))).split("\n", 2)[1]
+            .getBytes();
+        X509Certificate clientCertificate = (X509Certificate) CertificateFactory.getInstance("X.509")
+            .generateCertificate(new ByteArrayInputStream(clientCertBytes));
+        PublicKey clientKey = clientCertificate.getPublicKey();
+        byte[] serverCertBytes = new String(Files.readAllBytes(Paths.get("cert/" + secondParts[2] + ".cer")))
+            .split("\n", 2)[1].getBytes();
+        X509Certificate serverCertificate = (X509Certificate) CertificateFactory.getInstance("X.509")
+            .generateCertificate(new ByteArrayInputStream(serverCertBytes));
+        PublicKey serverKey = serverCertificate.getPublicKey();
+        byte[] firstPartEncrypted = encrypt(firstPart.getBytes(), clientKey);
+        String ticketContent = secondParts[0] + "," + secondParts[2] + "," + timeStampTwo.toString()+ "," + encodedKey;
+        byte[] ticketEncrypted = encrypt(ticketContent.getBytes(), serverKey);
+
+        dos.writeInt(firstPartEncrypted.length);
+        dos.write(firstPartEncrypted);
+        dos.writeInt(ticketEncrypted.length);
+        dos.write(ticketEncrypted);
+
+        System.out.println(Base64.getEncoder().encodeToString(firstPartEncrypted));
+        System.out.println(Base64.getEncoder().encodeToString(ticketEncrypted));
+
+      } catch (Exception e) {
         e.printStackTrace();
       }
     }
