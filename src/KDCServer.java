@@ -95,7 +95,6 @@ public class KDCServer {
           } catch (Exception ex) {
             ex.printStackTrace();
           }
-
         }
       }
       // Read the private key from keystore
@@ -130,6 +129,17 @@ public class KDCServer {
         }
       } catch (Exception ex) {
         ex.printStackTrace();
+      }
+
+      for (String alias : keys) {
+        File f = new File("unsignedCerts/" + alias + ".cer");
+        if (f.exists()) {
+          f.delete();
+        }
+      }
+      File f = new File("unsignedCerts");
+      if (f.exists()) {
+        f.delete();
       }
 
       // Client receiving thread
