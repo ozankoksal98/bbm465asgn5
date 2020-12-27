@@ -1,16 +1,20 @@
-import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.security.KeyStore;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.PrivateKey;
+import java.security.Signature;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Random;
@@ -44,23 +48,88 @@ public class KDCServer {
       if (!keystoreDir.exists()) {
         keystoreDir.mkdir();
       }
-      for (String key : keys) {
-        if (!Files.exists(Paths.get("keystore/" + key + ".jks"))) {
-          String[] keytoolArgs = new String[] { "keytool", "-genkeypair", "-alias", key, "-keyalg", "RSA", "-keystore",
-              "keystore/" + key + ".jks", "-dname", "CN=BBM463", "-storetype", "JKS", "-keypass", "password",
+      File unsignedCertDir = new File("unsignedCerts");
+      if (!unsignedCertDir.exists()) {
+        unsignedCertDir.mkdir();
+      }
+      File signedCertDir = new File("cert");
+      if (!signedCertDir.exists()) {
+        signedCertDir.mkdir();
+      }
+      File keysDir = new File("keys");
+      if (!keysDir.exists()) {
+        keysDir.mkdir();
+      }
+
+      for (String alias : keys) {
+        if (!Files.exists(Paths.get("keystore/" + alias + ".jks"))) {
+          String[] keyGenArgs = { "keytool", "-genkeypair", "-alias", alias, "-keyalg", "RSA", "-keystore",
+              "keystore/" + alias + ".jks", "-dname", "CN=BBM463", "-storetype", "JKS", "-keypass", "password",
               "-storepass", "password", "-validity", "365", "-keysize", "2048" };
           try {
-            Process p = Runtime.getRuntime().exec(keytoolArgs);
+            Process p = Runtime.getRuntime().exec(keyGenArgs);
             p.waitFor();
-            BufferedReader buf = new BufferedReader(new InputStreamReader(p.getInputStream()));
-            String line = "";
-            while ((line = buf.readLine()) != null) {
-              System.out.println(line);
-            }
           } catch (Exception ex) {
             ex.printStackTrace();
           }
         }
+        if (!Files.exists(Paths.get("unsignedCerts/" + alias + ".cer"))) {
+          String[] exportCertArgs = { "keytool", "-export", "-alias", alias, "-keystore", "keystore/" + alias + ".jks",
+              "-rfc", "-keypass", "password", "-storepass", "password", "-file", "unsignedCerts/" + alias + ".cer" };
+          try {
+            Process p = Runtime.getRuntime().exec(exportCertArgs);
+            p.waitFor();
+          } catch (Exception ex) {
+            ex.printStackTrace();
+          }
+        }
+
+        if (!Files.exists(Paths.get("keys/" + alias))) {
+          try {
+            FileInputStream fis = new FileInputStream("keystore/" + alias + ".jks");
+            KeyStore keystore = KeyStore.getInstance(KeyStore.getDefaultType());
+            keystore.load(fis, "password".toCharArray());
+            PrivateKey key = (PrivateKey) keystore.getKey(alias, "password".toCharArray());
+            byte[] encodedPrivateKey = Base64.getEncoder().encode(key.getEncoded());
+            Files.write(Paths.get("keys/" + alias), encodedPrivateKey);
+          } catch (Exception ex) {
+            ex.printStackTrace();
+          }
+
+        }
+      }
+      // Read the private key from keystore
+      try {
+        FileInputStream fis = new FileInputStream("keystore/kdc.jks");
+        KeyStore keystore = KeyStore.getInstance(KeyStore.getDefaultType());
+        keystore.load(fis, "password".toCharArray());
+        PrivateKey key = (PrivateKey) keystore.getKey("kdc", "password".toCharArray());
+        for (String alias : keys) {
+          // Read the certificate from cer file and sign the content
+          if (!Files.exists(Paths.get("cert/" + alias + ".cer"))) {
+            try {
+              if (key instanceof PrivateKey) {
+                byte[] certBytes = Files.readAllBytes(Paths.get("unsignedCerts/" + alias + ".cer"));
+                Signature sig = Signature.getInstance("SHA1WithRSA");
+                sig.initSign(key);
+                sig.update(certBytes);
+                byte[] sigBytes = sig.sign();
+                ByteArrayOutputStream signedCert = new ByteArrayOutputStream();
+                // Write to a new file inside cert directory
+                // First line is the signature bytes in
+                signedCert.write(Base64.getEncoder().encode(sigBytes));
+                signedCert.write("\n".getBytes());
+                signedCert.write(certBytes);
+                FileOutputStream fos = new FileOutputStream(new File("cert/" + alias + ".cer"));
+                signedCert.writeTo(fos);
+              }
+            } catch (Exception ex) {
+              ex.printStackTrace();
+            }
+          }
+        }
+      } catch (Exception ex) {
+        ex.printStackTrace();
       }
 
       // Client receiving thread
