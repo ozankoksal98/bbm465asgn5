@@ -1,8 +1,10 @@
+import java.io.BufferedWriter;
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileWriter;
 import java.math.BigInteger;
 import java.net.Socket;
 import java.nio.file.Files;
@@ -30,20 +32,36 @@ public class Client {
   private static DataInputStream dis;
   private static DataOutputStream dos;
   private static Cipher cipher;
-  private static String userpass, serverToConnect = "Mail";
+  private static String userpass, serverToConnect;
   private static PrivateKey privKey;
   private static SecretKey sessionKey;
   private static String clientName = "Alice";
   private static byte[] ticket;
+  private static BufferedWriter log;
+  private static String password;
 
   public static void main(String[] args) {
     try {
+      log = new BufferedWriter(new FileWriter("clientlog"));
+
       byte[] hashedPassword = Files.readAllBytes(new File("passwd").toPath());
       Scanner sc = new Scanner(System.in);
       System.out.println("Enter password");
-      while (!verifyPassword(sc.nextLine(), hashedPassword)) {
-        System.out.println("Enter password");
+      while (true) {
+        password = sc.nextLine();
+        if (!verifyPassword(password, hashedPassword)) {
+          System.out.println("Enter password");
+          log.write(String.format("Wrong password entered at %s.\n", new Date().toString()));
+          log.flush();
+        } else {
+          log.write(String.format("Correct password entered at %s.\n", new Date().toString()));
+          log.flush();
+          break;
+        }
       }
+      System.out.println("Which server do you want to establish a connection to ? (Mail, Web, Database)");
+      serverToConnect = sc.nextLine();
+      log.write("Client has chosen to establish connection to the " + serverToConnect + " server.\n");
       sc.close();
     } catch (Exception e) {
       e.printStackTrace();
@@ -51,7 +69,8 @@ public class Client {
     try {
       System.out.println(new Date().toString());
       getSessionKey();
-      connectToServer("mail");
+      connectToServer(serverToConnect);
+      log.close();
     } catch (Exception ex) {
       ex.printStackTrace();
     }
@@ -67,17 +86,21 @@ public class Client {
     connect(3000);
     // Send message 1
     try {
+      log.write("Connected to KDC server on port 3000.\n");
       cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding");
       String[] certFileContent = new String(Files.readAllBytes(Paths.get("cert/kdc.cer"))).split("\n", 2);
       byte[] signatureBytes = Base64.getDecoder().decode(certFileContent[0].getBytes());
       byte[] certBytes = certFileContent[1].getBytes();
       X509Certificate certificate = (X509Certificate) CertificateFactory.getInstance("X.509")
           .generateCertificate(new ByteArrayInputStream(certBytes));
+      log.write("Reading certificate and extracting public key of KDC server.\n");
+      log.write("KDC certificate signature in Base64: " + certFileContent[0] + "\n");
       PublicKey pk = certificate.getPublicKey();
       Signature sig = Signature.getInstance("SHA1WithRSA");
       sig.initVerify(pk);
       sig.update(certBytes);
       if (sig.verify(signatureBytes)) {
+        log.write("Signature verified.\n");
         // First part of the first message , client name
         dos.writeInt(clientName.getBytes().length);
         dos.write(clientName.getBytes());
@@ -86,20 +109,28 @@ public class Client {
         String secondPart = clientName + "," + userpass + "," + serverToConnect + "," + timeStampOne.toString();
         byte[] encryptedContent = encrypt(secondPart.getBytes(), pk);
         System.out.println(new String(Base64.getEncoder().encode(encryptedContent)));
+        log.write("1) Second part of the first message encrypted with KDC`s public key.\n");
+        log.write(String.format("1) First message content : %s, PKDC(%s, %s ,%s, %s)\n", clientName, clientName,
+            password, serverToConnect, timeStampOne.toString()));
         dos.writeInt(encryptedContent.length);
         dos.write(encryptedContent);
+        log.write("1) First message sent.\n");
         // Recieving the second message
         byte[] firstPartBytes = new byte[dis.readInt()];
         dis.readFully(firstPartBytes);
-        ticket= new byte[dis.readInt()];
+        ticket = new byte[dis.readInt()];
         dis.readFully(ticket);
+        log.write("2) Second message recieved.\n");
         FileInputStream fis = new FileInputStream("keystore/client.jks");
         KeyStore keystore = KeyStore.getInstance(KeyStore.getDefaultType());
         keystore.load(fis, "password".toCharArray());
         privKey = (PrivateKey) keystore.getKey("client", "password".toCharArray());
-        String[] firstPartDecrypted = new String(decrypt(firstPartBytes, privKey)).split(",");
-        sessionKey = new SecretKeySpec(Base64.getDecoder().decode(firstPartDecrypted[0]), "AES");
-        System.out.println("session key : "+firstPartDecrypted[0]);
+        String[] firstPart = new String(decrypt(firstPartBytes, privKey)).split(",");
+        log.write("2) First part of the second message decrypted with the private key of client.\n");
+        sessionKey = new SecretKeySpec(Base64.getDecoder().decode(firstPart[0]), "AES");
+        log.write(String.format("2) Second message content: PA(%s, %s, %s), Ticket\n", firstPart[0], firstPart[1],
+            firstPart[2]));
+        log.flush();
       }
 
     } catch (Exception ex) {
@@ -117,36 +148,48 @@ public class Client {
    */
   private static void connectToServer(String serverName) throws Exception {
     int portNumber;
-    if (serverName.equals("mail")) {
+    if (serverName.equals("Mail")) {
       portNumber = 3001;
-    } else if (serverName.equals("web")) {
+    } else if (serverName.equals("Web")) {
       portNumber = 3002;
     } else {
       portNumber = 3003;
     }
     System.out.println("Port number " + portNumber); // delete this last before submission
     connect(portNumber);
+    log.write("Connected to " + serverName + " server on port " + portNumber + ".\n");
     // Calculate the nonce
     int nonce = ThreadLocalRandom.current().nextInt();
     cipher = Cipher.getInstance("AES/ECB/PKCS5Padding");
-    System.out.println("nonce : " + nonce);
     byte[] encryptedNonce = encrypt(BigInteger.valueOf(nonce).toByteArray(), sessionKey);
-    System.out.println("encrypted :" + Base64.getEncoder().encodeToString(encryptedNonce));
+    log.write("3) Created nonce N1 : " + nonce + " -> encrypted -> "
+        + Base64.getEncoder().encodeToString(encryptedNonce) + " (encoded to Base64)\n");
+    log.write(String.format("3) Third message content : %s, Ticket, KA(%d)\n", clientName, nonce));
+    log.write("3) Third message sent.\n");
     dos.writeInt(clientName.length());
     dos.write(clientName.getBytes());
     dos.writeInt(ticket.length);
     dos.write(ticket);
     dos.writeInt(encryptedNonce.length);
     dos.write(encryptedNonce);
-    System.out.println(Base64.getEncoder().encodeToString(ticket));
-    byte[] messageFourEncrypted = new byte[dis.readInt()];
-    dis.readFully(messageFourEncrypted);
-    System.out.println(new String(decrypt(messageFourEncrypted, sessionKey)));
-    String[] messageFourSplit = new String(decrypt(messageFourEncrypted, sessionKey)).split(",");
-    int nonceTwo = Integer.parseInt(messageFourSplit[1]);
-    byte[] messsageFive = encrypt(BigInteger.valueOf(nonceTwo+1).toByteArray(),sessionKey);
-    dos.writeInt(messsageFive.length);
-    dos.write(messsageFive);
+    byte[] messageFour = new byte[dis.readInt()];
+    dis.readFully(messageFour);
+    log.write("4) Message four recieved and decrypted with session key(KA).\n");
+    String[] messageFourSplit = new String(decrypt(messageFour, sessionKey)).split(",");
+    int receivedNonce = Integer.parseInt(messageFourSplit[0]);
+    if (receivedNonce == nonce + 1) {
+      log.write(String.format("4) Received nonce %d matches created nonce %d +1\n", receivedNonce, nonce));
+      int nonceTwo = Integer.parseInt(messageFourSplit[1]);
+      log.write(String.format("4) Message four contents : KA(%d, %d)\n", receivedNonce, nonceTwo));
+      byte[] messageFive = encrypt(BigInteger.valueOf(nonceTwo + 1).toByteArray(), sessionKey);
+      log.write(String.format("5) Recieved nonce N2 created by %s server %d -> +1 -> %d -> encrypted -> %s (encoded to Base64)\n", serverName,
+          nonceTwo, nonceTwo + 1, Base64.getEncoder().encodeToString(messageFive)));
+      dos.writeInt(messageFive.length);
+      dos.write(messageFive);
+      log.write("5) Message five sent.\n");
+    } else {
+      log.write(String.format("4) Received nonce %d DOES NOT match created nonce %d +1", receivedNonce, nonce));
+    }
   }
 
   private static byte[] encrypt(byte[] content, Key key) throws Exception {

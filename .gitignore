@@ -25,3 +25,7 @@ notes
 passwd
 questions
 kdclog
+*log
+cert/
+keys/
+keystore/

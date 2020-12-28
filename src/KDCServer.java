@@ -1,3 +1,4 @@
+import java.io.BufferedWriter;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -5,6 +6,7 @@ import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.FileWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
@@ -20,7 +22,6 @@ import java.security.PublicKey;
 import java.security.Signature;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
-import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Date;
 import java.util.Random;
@@ -32,13 +33,14 @@ import javax.crypto.SecretKey;
 public class KDCServer {
   private static Cipher cipher;
   private static PrivateKey privKey;
+  private static DataInputStream dis;
+  private static DataOutputStream dos;
 
   public static void main(String[] args) {
     try {
+      BufferedWriter log = new BufferedWriter(new FileWriter("kdclog"));
       cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding");
       ServerSocket serverSocket = new ServerSocket(3000);
-      System.out.println("KDC server listening on port " + serverSocket.getLocalPort());
-      ArrayList<ClientHandler> threads = new ArrayList<>();
       // Generate 32 char byte random password
       Random random = new Random();
       String password = random.ints(48, 122 + 1).filter(i -> (i <= 57 || i >= 65) && (i <= 90 || i >= 97)).limit(32)
@@ -49,10 +51,11 @@ public class KDCServer {
         md.update(password.getBytes());
         byte[] hashedPassword = md.digest();
         byte[] encodedHash = Base64.getEncoder().encode(hashedPassword);
+        log.write("Created 32 char random password : " + password + "\n");
         new File("passwd").createNewFile();
         Files.write(new File("passwd").toPath(), encodedHash, StandardOpenOption.WRITE);
-        new File("kdclog").createNewFile();
-        Files.write(new File("kdclog").toPath(), password.getBytes(), StandardOpenOption.WRITE);
+        log.write("Password saved to the passwd file encoded in Base64.\n");
+        log.flush();
       } catch (NoSuchAlgorithmException ex) {
         ex.printStackTrace();
       }
@@ -61,6 +64,7 @@ public class KDCServer {
       File keystoreDir = new File("keystore");
       if (!keystoreDir.exists()) {
         keystoreDir.mkdir();
+        log.write("Keystore directory created.\n");
       }
       File unsignedCertDir = new File("unsignedCerts");
       if (!unsignedCertDir.exists()) {
@@ -69,10 +73,12 @@ public class KDCServer {
       File signedCertDir = new File("cert");
       if (!signedCertDir.exists()) {
         signedCertDir.mkdir();
+        log.write("Cert directory created.\n");
       }
       File keysDir = new File("keys");
       if (!keysDir.exists()) {
         keysDir.mkdir();
+        log.write("Keys directory created.\n");
       }
 
       for (String alias : keys) {
@@ -82,14 +88,22 @@ public class KDCServer {
               "-storepass", "password", "-validity", "365", "-keysize", "2048" };
           Process p = Runtime.getRuntime().exec(keyGenArgs);
           p.waitFor();
-
+          if (alias.equals("client")) {
+            log.write("Keystore for " + alias + " created.\n");
+          } else {
+            log.write("Keystore for " + alias + " server created.\n");
+          }
         }
         if (!Files.exists(Paths.get("unsignedCerts/" + alias + ".cer"))) {
           String[] exportCertArgs = { "keytool", "-export", "-alias", alias, "-keystore", "keystore/" + alias + ".jks",
               "-rfc", "-keypass", "password", "-storepass", "password", "-file", "unsignedCerts/" + alias + ".cer" };
           Process p = Runtime.getRuntime().exec(exportCertArgs);
           p.waitFor();
-
+          if (alias.equals("client")) {
+            log.write("Certificate file for " + alias + " created.\n");
+          } else {
+            log.write("Certificate file for " + alias + " server created.\n");
+          }
         }
 
         if (!Files.exists(Paths.get("keys/" + alias))) {
@@ -99,6 +113,11 @@ public class KDCServer {
           PrivateKey key = (PrivateKey) keystore.getKey(alias, "password".toCharArray());
           byte[] encodedPrivateKey = Base64.getEncoder().encode(key.getEncoded());
           Files.write(Paths.get("keys/" + alias), encodedPrivateKey);
+          if (alias.equals("client")) {
+            log.write("Private key file for " + alias + " created.\n");
+          } else {
+            log.write("Private key file for " + alias + " server created.\n");
+          }
         }
       }
       // Read the private key from keystore
@@ -106,6 +125,7 @@ public class KDCServer {
       KeyStore keystore = KeyStore.getInstance(KeyStore.getDefaultType());
       keystore.load(fis, "password".toCharArray());
       privKey = (PrivateKey) keystore.getKey("kdc", "password".toCharArray());
+      log.write("Private key is read in from the keystore.\n");
       for (String alias : keys) {
         // Read the certificate from cer file and sign the content
         if (!Files.exists(Paths.get("cert/" + alias + ".cer"))) {
@@ -123,6 +143,12 @@ public class KDCServer {
             signedCert.write(certBytes);
             FileOutputStream fos = new FileOutputStream(new File("cert/" + alias + ".cer"));
             signedCert.writeTo(fos);
+            if (alias.equals("client")) {
+              log.write("Certificate file for " + alias + " signed.\n");
+            } else {
+              log.write("Certificate file for " + alias + " server signed.\n");
+            }
+            log.write("Signature added to the first line of the file.\n");
           }
         }
       }
@@ -139,11 +165,74 @@ public class KDCServer {
 
       // Client receiving thread
       Thread reception = new Thread(() -> {
+        try {
+          log.write("------KDC server started listening on port " + serverSocket.getLocalPort() + ".------\n");
+          log.flush();
+        } catch (Exception ex) {
+          ex.printStackTrace();
+        }
+
         Thread.currentThread();
         while (!Thread.interrupted()) {
           try {
-            ClientHandler ch = new ClientHandler(serverSocket.accept());
-            ch.start();
+            Socket clientSocket = serverSocket.accept();
+            log.write("New client connected.\n");
+            dis = new DataInputStream(clientSocket.getInputStream());
+            dos = new DataOutputStream(clientSocket.getOutputStream());
+
+            // Size of message length can be made static later !!
+            // Receive first message
+            log.write("1) First message recieved.\n");
+            int clientNameLength = dis.readInt();
+            byte[] clientNameBytes = new byte[clientNameLength];
+            dis.readFully(clientNameBytes);
+            String clientName = new String(clientNameBytes);
+            int encryptedContentLength = dis.readInt();
+            byte[] encryptedContent = new byte[encryptedContentLength];
+            dis.readFully(encryptedContent);
+            String[] secondParts = new String(decrypt(encryptedContent, privKey)).split(",");
+            log.write("1) Encrypted part of the first message decrypted with KDC`s private key(RKDC).\n");
+            log.write(String.format("1) First message content : %s, PKDC(%s)\n", clientName, String.join(", ", secondParts)));
+            // Send second message
+            // First part of the second message
+            Date timeStampTwo = new Date();
+            KeyGenerator kg = KeyGenerator.getInstance("AES");
+            kg.init(128);
+            SecretKey sessionKey = kg.generateKey();
+            log.write("2) Session key (KA) generated.\n");
+            String encodedKey = Base64.getEncoder().encodeToString(sessionKey.getEncoded());
+            log.write(String.format("2) Session key encoded in Base64 : %s\n" , encodedKey));
+            String firstPart = encodedKey + "," + secondParts[2] + "," + timeStampTwo.toString();
+            byte[] clientCertBytes = new String(Files.readAllBytes(Paths.get("cert/client.cer"))).split("\n", 2)[1]
+                .getBytes();
+            X509Certificate clientCertificate = (X509Certificate) CertificateFactory.getInstance("X.509")
+                .generateCertificate(new ByteArrayInputStream(clientCertBytes));
+            PublicKey clientKey = clientCertificate.getPublicKey();
+            byte[] serverCertBytes = new String(Files.readAllBytes(Paths.get("cert/" + secondParts[2] + ".cer")))
+                .split("\n", 2)[1].getBytes();
+            X509Certificate serverCertificate = (X509Certificate) CertificateFactory.getInstance("X.509")
+                .generateCertificate(new ByteArrayInputStream(serverCertBytes));
+            PublicKey serverKey = serverCertificate.getPublicKey();
+            byte[] firstPartEncrypted = encrypt(firstPart.getBytes(), clientKey);
+            log.write("2) First part of the second message created and encrypted with clients public key.\n");
+            log.write(String.format("2) First part : PA(%s, %s, %s)\n", clientName, secondParts[2], timeStampTwo.toString()));
+            String ticketContent = secondParts[0] + "," + secondParts[2] + "," + timeStampTwo.toString() + ","
+                + encodedKey;
+            log.write("2) Second part of the first message 'ticket' created and encrypted with "+ secondParts[2] +" server`s public key.\n");
+            log.write(String.format("2) Ticket : P%s(%s, %s, %s, %s)\n",secondParts[2] ,secondParts[0], secondParts[2], timeStampTwo.toString(), encodedKey));
+            byte[] ticketEncrypted = encrypt(ticketContent.getBytes(), serverKey);
+            System.out.println(secondParts[2]);
+
+            dos.writeInt(firstPartEncrypted.length);
+            dos.write(firstPartEncrypted);
+            dos.writeInt(ticketEncrypted.length);
+            dos.write(ticketEncrypted);
+            log.write(String.format("2) Second message content : PA(%s, %s, %s), Ticket\n", clientName, secondParts[2], timeStampTwo.toString()));
+            log.write("2) Second message sent.\n");
+            dis.close();
+            dos.close();
+            clientSocket.close();
+            log.flush();
           } catch (SocketException se) {
 
           } catch (Exception ex) {
@@ -163,16 +252,14 @@ public class KDCServer {
           break;
         }
       }
-      // Server closing sequence
-      for (ClientHandler t : threads) { // Stop client threads.
-        t.disconnect();
-        t.interrupt();
-      }
       // Close remaining threads sockets etc.
+      log.close();
       reception.interrupt();
       sc.close();
       serverSocket.close();
-    } catch (Exception e) {
+    } catch (
+
+    Exception e) {
       e.printStackTrace();
 
     }
@@ -186,72 +273,5 @@ public class KDCServer {
   private static byte[] decrypt(byte[] content, Key key) throws Exception {
     cipher.init(2, key);
     return cipher.doFinal(content);
-  }
-
-  private static class ClientHandler extends Thread {
-    private Socket clientSocket;
-    private DataInputStream dis;
-    private DataOutputStream dos;
-
-    public ClientHandler(Socket socket) {
-      this.clientSocket = socket;
-    }
-
-    public void disconnect() {
-      try {
-        dis.close();
-        dos.close();
-      } catch (Exception ex) {
-        ex.printStackTrace();
-      }
-    }
-
-    public void run() {
-      try {
-        this.dis = new DataInputStream(clientSocket.getInputStream());
-        this.dos = new DataOutputStream(clientSocket.getOutputStream());
-
-        // Size of message length can be made static later !!
-        // Receive first message
-        int clientNameLength = dis.readInt();
-        byte[] clientNameBytes = new byte[clientNameLength];
-        dis.readFully(clientNameBytes);
-        int encryptedContentLength = dis.readInt();
-        byte[] encryptedContent = new byte[encryptedContentLength];
-        dis.readFully(encryptedContent);
-        String[] secondParts = new String(decrypt(encryptedContent, privKey)).split(",");
-
-        // Send second message
-        // First part of the second message
-        Date timeStampTwo = new Date();
-        KeyGenerator kg = KeyGenerator.getInstance("AES");
-        kg.init(128);
-        SecretKey sessionKey = kg.generateKey();
-        String encodedKey = Base64.getEncoder().encodeToString(sessionKey.getEncoded());
-        String firstPart = encodedKey + "," + secondParts[2] + "," + timeStampTwo.toString();
-        byte[] clientCertBytes = new String(Files.readAllBytes(Paths.get("cert/client.cer"))).split("\n", 2)[1]
-            .getBytes();
-        X509Certificate clientCertificate = (X509Certificate) CertificateFactory.getInstance("X.509")
-            .generateCertificate(new ByteArrayInputStream(clientCertBytes));
-        PublicKey clientKey = clientCertificate.getPublicKey();
-        byte[] serverCertBytes = new String(Files.readAllBytes(Paths.get("cert/" + secondParts[2] + ".cer")))
-            .split("\n", 2)[1].getBytes();
-        X509Certificate serverCertificate = (X509Certificate) CertificateFactory.getInstance("X.509")
-            .generateCertificate(new ByteArrayInputStream(serverCertBytes));
-        PublicKey serverKey = serverCertificate.getPublicKey();
-        byte[] firstPartEncrypted = encrypt(firstPart.getBytes(), clientKey);
-        String ticketContent = secondParts[0] + "," + secondParts[2] + "," + timeStampTwo.toString() + "," + encodedKey;
-        byte[] ticketEncrypted = encrypt(ticketContent.getBytes(), serverKey);
-        System.out.println(secondParts[2]);
-
-        dos.writeInt(firstPartEncrypted.length);
-        dos.write(firstPartEncrypted);
-        dos.writeInt(ticketEncrypted.length);
-        dos.write(ticketEncrypted);
-
-      } catch (Exception e) {
-        e.printStackTrace();
-      }
-    }
   }
 }
