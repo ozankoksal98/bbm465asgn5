@@ -96,12 +96,12 @@ public class Server {
             log.write(("5) Message five decrypted with session key.\n"));
             byte[] messageFiveDecrypted = decrypt(messageFive, sessionKey);
             int recievedNonceTwo = new BigInteger(messageFiveDecrypted).intValue();
-            log.write(String.format("5) Message five content : KA(%d)",recievedNonceTwo));
+            log.write(String.format("5) Message five content : KA(%d)\n",recievedNonceTwo));
             if (recievedNonceTwo == nonceTwo + 1) {
               log.write(
-                  String.format("5) Recieved nonce %d matches the created nonce %d +1", recievedNonceTwo, nonceTwo));
+                  String.format("5) Recieved nonce %d matches the created nonce %d +1\n", recievedNonceTwo, nonceTwo));
             } else {
-              log.write(String.format("5) Recieved nonce %d DOES NOT match the created nonce %d +1", recievedNonceTwo,
+              log.write(String.format("5) Recieved nonce %d DOES NOT match the created nonce %d +1\n", recievedNonceTwo,
                   nonceTwo));
             }
             log.flush();

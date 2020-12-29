@@ -198,6 +198,11 @@ public class KDCServer {
             String[] secondParts = new String(decrypt(encryptedContent, privKey)).split(",");
             log.write("1) Encrypted part of the first message decrypted with KDC`s private key(RKDC).\n");
             log.write(String.format("1) First message content : %s, PKDC(%s)\n", clientName, String.join(", ", secondParts)));
+            if(secondParts[1].equals(password)){
+              log.write("1) Password in the encrypted part of the first message matches created password.\n");
+            }else{
+              log.write("1) Password in the encrypted part of the first message DOES NOT match the created password.\n");
+            }
             // Send second message
             // First part of the second message
             Date timeStampTwo = new Date();
