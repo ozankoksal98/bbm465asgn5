@@ -17,6 +17,11 @@ import javax.crypto.Cipher;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
 
+/**
+ * Can be run as :
+ * $ java Server <serverType>
+ * serverType => Mail | Web | Database
+ */
 public class Server {
   private static String serverName;
   private static int portNumber;
@@ -34,11 +39,13 @@ public class Server {
     }
     serverName = args[0];
     try {
-      BufferedWriter log = new BufferedWriter(new FileWriter(serverName.toLowerCase()+"ServerLog"));
+      BufferedWriter log = new BufferedWriter(new FileWriter(serverName.toLowerCase() + "ServerLog"));
       ServerSocket serverSocket = new ServerSocket(portNumber);
-      System.out.println("Listening on " + serverSocket.getLocalPort());
+      System.out.println("------" + serverName + " server started listening on port number "
+          + serverSocket.getLocalPort() + "------");
       log.write("------" + serverName + " server started listening on port number " + serverSocket.getLocalPort()
-          + ".------\n");
+          + "------\n");
+      // Reading the private key of the server
       FileInputStream fis = new FileInputStream("keystore/" + args[0] + ".jks");
       KeyStore keystore = KeyStore.getInstance(KeyStore.getDefaultType());
       keystore.load(fis, "password".toCharArray());
@@ -51,6 +58,7 @@ public class Server {
             log.write("New client connected.\n");
             DataInputStream dis = new DataInputStream(client.getInputStream());
             DataOutputStream dos = new DataOutputStream(client.getOutputStream());
+            // Reading the third message
             byte[] clientNameBytes = new byte[dis.readInt()];
             dis.readFully(clientNameBytes);
             byte[] ticket = new byte[dis.readInt()];
@@ -63,30 +71,38 @@ public class Server {
             String[] ticketContents = new String(decrypt(ticket, privKey)).split(",");
             log.write("3) Ticket decrypted with " + serverName + " server's private key.\n");
             log.write("3) Session key in Base64 : " + ticketContents[3] + "\n");
+            // Since the key is an array of bytes, the keys is sent in Base64 format
             byte[] keyBytes = Base64.getDecoder().decode(ticketContents[3]);
             SecretKey sessionKey = new SecretKeySpec(keyBytes, "AES");
             cipher = Cipher.getInstance("AES/ECB/PKCS5Padding");
+            // The line below N1
             int nonce = new BigInteger(decrypt(encryptedNonce, sessionKey)).intValue();
             log.write("3) Recieved nonce value decrypted (N1) : " + nonce + "\n");
             log.write(String.format("3) Third message contents : %s, P%s(%s, %s, %s, %s), KA(%d)\n", clientName,
                 serverName, ticketContents[0], ticketContents[1], ticketContents[2], ticketContents[3], nonce));
             int nonceTwo = ThreadLocalRandom.current().nextInt();
             String messageFour = String.valueOf((nonce + 1)) + "," + String.valueOf(nonceTwo);
+            // Creating and sending message four
             log.write("4) Created nonce value N2 : " + nonceTwo + "\n");
             byte[] messsageFourEncrypted = encrypt(messageFour.getBytes(), sessionKey);
             log.write(String.format("4) Message four contents : KA(%d, %d)\n", nonce + 1, nonceTwo));
             dos.writeInt(messsageFourEncrypted.length);
             dos.write(messsageFourEncrypted);
             log.write("4) Message four sent.\n");
+            // Recieving message five
             byte[] messageFive = new byte[dis.readInt()];
             dis.readFully(messageFive);
             log.write("5) Message five recieved.\n");
+            log.write(("5) Message five decrypted with session key.\n"));
             byte[] messageFiveDecrypted = decrypt(messageFive, sessionKey);
             int recievedNonceTwo = new BigInteger(messageFiveDecrypted).intValue();
-            if(recievedNonceTwo == nonceTwo+1){
-              log.write(String.format("5) Recieved nonce %d matches the created nonce %d +1", recievedNonceTwo, nonceTwo));
-            }else{
-              log.write(String.format("5) Recieved nonce %d DOES NOT match the created nonce %d +1", recievedNonceTwo, nonceTwo));
+            log.write(String.format("5) Message five content : KA(%d)",recievedNonceTwo));
+            if (recievedNonceTwo == nonceTwo + 1) {
+              log.write(
+                  String.format("5) Recieved nonce %d matches the created nonce %d +1", recievedNonceTwo, nonceTwo));
+            } else {
+              log.write(String.format("5) Recieved nonce %d DOES NOT match the created nonce %d +1", recievedNonceTwo,
+                  nonceTwo));
             }
             log.flush();
           } catch (SocketException se) {

@@ -59,7 +59,7 @@ public class KDCServer {
       } catch (NoSuchAlgorithmException ex) {
         ex.printStackTrace();
       }
-      // Create keystores, certs
+      // Create keystores, certs, directories if there are any missing.
       String[] keys = { "client", "kdc", "Web", "Mail", "Database" };
       File keystoreDir = new File("keystore");
       if (!keystoreDir.exists()) {
@@ -83,6 +83,7 @@ public class KDCServer {
 
       for (String alias : keys) {
         if (!Files.exists(Paths.get("keystore/" + alias + ".jks"))) {
+          // Generating key pair
           String[] keyGenArgs = { "keytool", "-genkeypair", "-alias", alias, "-keyalg", "RSA", "-keystore",
               "keystore/" + alias + ".jks", "-dname", "CN=BBM463", "-storetype", "JKS", "-keypass", "password",
               "-storepass", "password", "-validity", "365", "-keysize", "2048" };
@@ -95,6 +96,7 @@ public class KDCServer {
           }
         }
         if (!Files.exists(Paths.get("unsignedCerts/" + alias + ".cer"))) {
+          // Exporting X509 certificate
           String[] exportCertArgs = { "keytool", "-export", "-alias", alias, "-keystore", "keystore/" + alias + ".jks",
               "-rfc", "-keypass", "password", "-storepass", "password", "-file", "unsignedCerts/" + alias + ".cer" };
           Process p = Runtime.getRuntime().exec(exportCertArgs);
@@ -107,6 +109,7 @@ public class KDCServer {
         }
 
         if (!Files.exists(Paths.get("keys/" + alias))) {
+          // Reading the private key and saving it in Base64 format
           FileInputStream fis = new FileInputStream("keystore/" + alias + ".jks");
           KeyStore keystore = KeyStore.getInstance(KeyStore.getDefaultType());
           keystore.load(fis, "password".toCharArray());
@@ -137,7 +140,7 @@ public class KDCServer {
             byte[] sigBytes = sig.sign();
             ByteArrayOutputStream signedCert = new ByteArrayOutputStream();
             // Write to a new file inside cert directory
-            // First line is the signature bytes in
+            // Adding the signature bytes encoded in Base64, to the cert file as the first line.
             signedCert.write(Base64.getEncoder().encode(sigBytes));
             signedCert.write("\n".getBytes());
             signedCert.write(certBytes);
@@ -152,6 +155,7 @@ public class KDCServer {
           }
         }
       }
+    // Rem
       for (String alias : keys) {
         File f = new File("unsignedCerts/" + alias + ".cer");
         if (f.exists()) {
@@ -166,7 +170,8 @@ public class KDCServer {
       // Client receiving thread
       Thread reception = new Thread(() -> {
         try {
-          log.write("------KDC server started listening on port " + serverSocket.getLocalPort() + ".------\n");
+          System.out.println("------KDC server started listening on port " + serverSocket.getLocalPort() + "------");
+          log.write("------KDC server started listening on port " + serverSocket.getLocalPort() + "------\n");
           log.flush();
         } catch (Exception ex) {
           ex.printStackTrace();

@@ -26,7 +26,6 @@ import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
 import java.util.concurrent.ThreadLocalRandom;
 
-// Alice
 public class Client {
   private static Socket socket;
   private static DataInputStream dis;
@@ -42,8 +41,8 @@ public class Client {
 
   public static void main(String[] args) {
     try {
-      log = new BufferedWriter(new FileWriter("clientlog"));
-
+      log = new BufferedWriter(new FileWriter("clientLog"));
+      // Password created by kdc
       byte[] hashedPassword = Files.readAllBytes(new File("passwd").toPath());
       Scanner sc = new Scanner(System.in);
       System.out.println("Enter password");
@@ -67,14 +66,14 @@ public class Client {
       e.printStackTrace();
     }
     try {
-      System.out.println(new Date().toString());
+      // Connect to KDC server get the session key.
       getSessionKey();
+      // Establish connection to chosen server and get authorization.
       connectToServer(serverToConnect);
       log.close();
     } catch (Exception ex) {
       ex.printStackTrace();
     }
-
   }
 
   /**
@@ -88,6 +87,7 @@ public class Client {
     try {
       log.write("Connected to KDC server on port 3000.\n");
       cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding");
+      // Reading the certificate file and extracting the signature and certificate.
       String[] certFileContent = new String(Files.readAllBytes(Paths.get("cert/kdc.cer"))).split("\n", 2);
       byte[] signatureBytes = Base64.getDecoder().decode(certFileContent[0].getBytes());
       byte[] certBytes = certFileContent[1].getBytes();
@@ -99,6 +99,7 @@ public class Client {
       Signature sig = Signature.getInstance("SHA1WithRSA");
       sig.initVerify(pk);
       sig.update(certBytes);
+      // Verifying the signature.
       if (sig.verify(signatureBytes)) {
         log.write("Signature verified.\n");
         // First part of the first message , client name
@@ -106,9 +107,9 @@ public class Client {
         dos.write(clientName.getBytes());
         // Second part of the first message that will be encrypted.
         Date timeStampOne = new Date();
+        // Second part of the first message PKDC(...)
         String secondPart = clientName + "," + userpass + "," + serverToConnect + "," + timeStampOne.toString();
         byte[] encryptedContent = encrypt(secondPart.getBytes(), pk);
-        System.out.println(new String(Base64.getEncoder().encode(encryptedContent)));
         log.write("1) Second part of the first message encrypted with KDC`s public key.\n");
         log.write(String.format("1) First message content : %s, PKDC(%s, %s ,%s, %s)\n", clientName, clientName,
             password, serverToConnect, timeStampOne.toString()));
@@ -116,11 +117,13 @@ public class Client {
         dos.write(encryptedContent);
         log.write("1) First message sent.\n");
         // Recieving the second message
+        // First part of the second message PA(Client, serverToConnect, sessionKey)
         byte[] firstPartBytes = new byte[dis.readInt()];
         dis.readFully(firstPartBytes);
         ticket = new byte[dis.readInt()];
         dis.readFully(ticket);
         log.write("2) Second message recieved.\n");
+        // Reading the private key of the client from the keystore
         FileInputStream fis = new FileInputStream("keystore/client.jks");
         KeyStore keystore = KeyStore.getInstance(KeyStore.getDefaultType());
         keystore.load(fis, "password".toCharArray());
@@ -155,10 +158,9 @@ public class Client {
     } else {
       portNumber = 3003;
     }
-    System.out.println("Port number " + portNumber); // delete this last before submission
     connect(portNumber);
     log.write("Connected to " + serverName + " server on port " + portNumber + ".\n");
-    // Calculate the nonce
+    // Create the nonce N1
     int nonce = ThreadLocalRandom.current().nextInt();
     cipher = Cipher.getInstance("AES/ECB/PKCS5Padding");
     byte[] encryptedNonce = encrypt(BigInteger.valueOf(nonce).toByteArray(), sessionKey);
@@ -166,17 +168,21 @@ public class Client {
         + Base64.getEncoder().encodeToString(encryptedNonce) + " (encoded to Base64)\n");
     log.write(String.format("3) Third message content : %s, Ticket, KA(%d)\n", clientName, nonce));
     log.write("3) Third message sent.\n");
+    // Send third message
     dos.writeInt(clientName.length());
     dos.write(clientName.getBytes());
     dos.writeInt(ticket.length);
     dos.write(ticket);
     dos.writeInt(encryptedNonce.length);
     dos.write(encryptedNonce);
+    // Recieve fourth message
     byte[] messageFour = new byte[dis.readInt()];
     dis.readFully(messageFour);
     log.write("4) Message four recieved and decrypted with session key(KA).\n");
     String[] messageFourSplit = new String(decrypt(messageFour, sessionKey)).split(",");
+    // receivedNonce = N1 + 1
     int receivedNonce = Integer.parseInt(messageFourSplit[0]);
+    // Checking if recieved nonce is correct
     if (receivedNonce == nonce + 1) {
       log.write(String.format("4) Received nonce %d matches created nonce %d +1\n", receivedNonce, nonce));
       int nonceTwo = Integer.parseInt(messageFourSplit[1]);
@@ -184,12 +190,15 @@ public class Client {
       byte[] messageFive = encrypt(BigInteger.valueOf(nonceTwo + 1).toByteArray(), sessionKey);
       log.write(String.format("5) Recieved nonce N2 created by %s server %d -> +1 -> %d -> encrypted -> %s (encoded to Base64)\n", serverName,
           nonceTwo, nonceTwo + 1, Base64.getEncoder().encodeToString(messageFive)));
+      log.write(String.format("5) Message five content : PA(%s)\n",nonceTwo+1));
+      // Sending fifth message
       dos.writeInt(messageFive.length);
       dos.write(messageFive);
       log.write("5) Message five sent.\n");
     } else {
       log.write(String.format("4) Received nonce %d DOES NOT match created nonce %d +1", receivedNonce, nonce));
     }
+    disconnect();
   }
 
   private static byte[] encrypt(byte[] content, Key key) throws Exception {
@@ -212,8 +221,6 @@ public class Client {
       socket = new Socket("localhost", portNumber);
       dis = new DataInputStream(socket.getInputStream());
       dos = new DataOutputStream(socket.getOutputStream());
-      System.out.println("Connected to " + portNumber);
-
     } catch (Exception e) {
       System.out.println("Couldnt connect!");
       e.printStackTrace();
@@ -221,11 +228,10 @@ public class Client {
   }
 
   /**
-   * Disconnects from the current socket connection
+   * Disconnects from the current socket connection nad unsets the input, output streams
    */
   private static void disconnect() {
     try {
-      System.out.println("disconnected");
       dis.close();
       dos.close();
       socket.close();
@@ -234,7 +240,12 @@ public class Client {
     }
   }
 
-  // verify password by comparing hashes
+  /**
+   * Verifies the entered password by comparing the saved hash with the entered passwords hash.
+   * @param password
+   * @param hashedPassword
+   * @return
+   */
   private static boolean verifyPassword(String password, byte[] hashedPassword) {
     try {
       MessageDigest md = MessageDigest.getInstance("SHA-1");
